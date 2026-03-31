@@ -130,8 +130,8 @@ function collectPaletteColors(data, channels) {
   return [...colors.values()];
 }
 
-function buildColorMaskBuffer({ data, channels, width, height, targetColor }) {
-  const mask = Buffer.alloc(width * height * 3);
+function buildColorBinaryMask({ data, channels, targetColor }) {
+  const mask = new Uint8Array(data.length / channels);
 
   for (let i = 0, pixel = 0; i < data.length; i += channels, pixel += 1) {
     const r = data[i];
@@ -140,24 +140,155 @@ function buildColorMaskBuffer({ data, channels, width, height, targetColor }) {
     const alpha = channels === 4 ? data[i + 3] : 255;
 
     const match = alpha >= 16 && r === targetColor.r && g === targetColor.g && b === targetColor.b;
-    const value = match ? 0 : 255;
+    mask[pixel] = match ? 1 : 0;
+  }
 
-    const idx = pixel * 3;
-    mask[idx] = value;
-    mask[idx + 1] = value;
-    mask[idx + 2] = value;
+  return mask;
+}
+
+function buildMonochromeBinaryMask({ data, channels }) {
+  const mask = new Uint8Array(data.length / channels);
+
+  for (let i = 0, pixel = 0; i < data.length; i += channels, pixel += 1) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    const alpha = channels === 4 ? data[i + 3] : 255;
+    const luminance = (r + g + b) / 3;
+
+    mask[pixel] = (alpha >= 16 && luminance < 128) ? 1 : 0;
+  }
+
+  return mask;
+}
+
+function findConnectedComponents(binaryMask, width, height, minPixels, maxComponents) {
+  const visited = new Uint8Array(binaryMask.length);
+  const components = [];
+  const stack = [];
+
+  for (let index = 0; index < binaryMask.length; index += 1) {
+    if (!binaryMask[index] || visited[index]) {
+      continue;
+    }
+
+    const pixels = [];
+    stack.push(index);
+    visited[index] = 1;
+
+    while (stack.length) {
+      const current = stack.pop();
+      pixels.push(current);
+
+      const x = current % width;
+      const y = Math.floor(current / width);
+
+      const neighbors = [];
+      if (x > 0) neighbors.push(current - 1);
+      if (x < width - 1) neighbors.push(current + 1);
+      if (y > 0) neighbors.push(current - width);
+      if (y < height - 1) neighbors.push(current + width);
+
+      for (const neighbor of neighbors) {
+        if (!visited[neighbor] && binaryMask[neighbor]) {
+          visited[neighbor] = 1;
+          stack.push(neighbor);
+        }
+      }
+    }
+
+    if (pixels.length >= minPixels) {
+      components.push(pixels);
+    }
+  }
+
+  components.sort((a, b) => b.length - a.length);
+  return components.slice(0, maxComponents);
+}
+
+function buildComponentMaskBuffer({ width, height, componentPixels }) {
+  const mask = Buffer.alloc(width * height);
+  mask.fill(255);
+
+  for (const pixel of componentPixels) {
+    mask[pixel] = 0;
   }
 
   return sharp(mask, {
-    raw: { width, height, channels: 3 }
+    raw: { width, height, channels: 1 }
   })
-    .png({ compressionLevel: 9, palette: true })
+    .png({ compressionLevel: 1 })
     .toBuffer();
+}
+
+async function traceComponents({
+  binaryMask,
+  width,
+  height,
+  fillColor,
+  traceOptions,
+  minComponentPixels,
+  maxComponents
+}) {
+  const components = findConnectedComponents(
+    binaryMask,
+    width,
+    height,
+    minComponentPixels,
+    maxComponents
+  );
+
+  const pathTags = [];
+
+  for (const componentPixels of components) {
+    const componentMaskBuffer = await buildComponentMaskBuffer({
+      width,
+      height,
+      componentPixels
+    });
+
+    const tracedLayer = await traceWithFallback(componentMaskBuffer, {
+      ...traceOptions,
+      threshold: 128,
+      blackOnWhite: true
+    });
+
+    const tracedPaths = extractPathTags(tracedLayer).map((tag) => recolorPath(tag, fillColor));
+    if (tracedPaths.length) {
+      pathTags.push(...tracedPaths);
+    }
+  }
+
+  return pathTags;
 }
 
 async function vectorizeMonochrome(inputBuffer, options) {
   const traceOptions = normalizeTraceOptions(options);
-  return traceWithFallback(inputBuffer, traceOptions);
+  const { data, info } = await sharp(inputBuffer)
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const binaryMask = buildMonochromeBinaryMask({
+    data,
+    channels: info.channels
+  });
+
+  const pathTags = await traceComponents({
+    binaryMask,
+    width: info.width,
+    height: info.height,
+    fillColor: '#000000',
+    traceOptions,
+    minComponentPixels: Math.max(50, options.turdSize * 10),
+    maxComponents: 16
+  });
+
+  if (!pathTags.length) {
+    return traceWithFallback(inputBuffer, traceOptions);
+  }
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${info.width}" height="${info.height}" viewBox="0 0 ${info.width} ${info.height}">${pathTags.join('')}</svg>`;
 }
 
 async function vectorizePalette(inputBuffer, options) {
@@ -187,25 +318,24 @@ async function vectorizePalette(inputBuffer, options) {
   const pathLayers = [];
 
   for (const color of selectedColors) {
-    const maskBuffer = await buildColorMaskBuffer({
+    const binaryMask = buildColorBinaryMask({
       data,
       channels: info.channels,
-      width: info.width,
-      height: info.height,
       targetColor: color
     });
 
-    const tracedLayer = await traceWithFallback(maskBuffer, {
-      ...normalizeTraceOptions(options),
-      threshold: 128,
-      blackOnWhite: true
+    const tracedPaths = await traceComponents({
+      binaryMask,
+      width: info.width,
+      height: info.height,
+      fillColor: toHexColor(color),
+      traceOptions: normalizeTraceOptions(options),
+      minComponentPixels: Math.max(50, options.turdSize * 10),
+      maxComponents: 12
     });
 
-    const colorHex = toHexColor(color);
-    const pathTags = extractPathTags(tracedLayer).map((tag) => recolorPath(tag, colorHex));
-
-    if (pathTags.length) {
-      pathLayers.push(...pathTags);
+    if (tracedPaths.length) {
+      pathLayers.push(...tracedPaths);
     }
   }
 

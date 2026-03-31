@@ -45,8 +45,13 @@ src/
    - `palette`: normalización + reducción de ruido + cuantización de paleta
 5. Vectorización Potrace:
    - `monochrome`: `trace`
-   - `palette`: `posterize` por capas con fills separados
+   - `palette`: trazado por máscaras de color con fills separados
+   - separación por componentes conectados para devolver piezas editables individuales
 6. Post-procesamiento SVG: limpieza, optimización y separación de paths editables
+   - preserva geometrías compuestas (no rompe huecos internos)
+   - aplica `fill-rule="evenodd"` / `clip-rule="evenodd"` para huecos reales
+   - elimina capas duplicadas de la misma geometría
+   - añade `stroke` por defecto con el color de capa para mantener borde al transparentar fill
 7. Respuesta JSON con SVG
 
 ## Parámetros y rangos recomendados

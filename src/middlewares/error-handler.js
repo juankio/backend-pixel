@@ -29,11 +29,14 @@ export function setGlobalErrorHandler(fastify) {
       'Error procesando solicitud.'
     );
 
+    const message = isKnown ? error.message : 'Error interno del servidor.';
+
     return reply.status(statusCode).send({
       success: false,
+      message,
       error: {
         code: error.code || 'INTERNAL_ERROR',
-        message: isKnown ? error.message : 'Error interno del servidor.',
+        message,
         details: error.details || null
       }
     });

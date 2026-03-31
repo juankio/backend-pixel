@@ -86,7 +86,7 @@ function buildMonochromePreprocess(inputBuffer, { threshold, mode }) {
 
   return image
     .threshold(safeThreshold, { grayscale: true })
-    .png({ compressionLevel: 9, palette: true, quality: 100 });
+    .png({ compressionLevel: 3 });
 }
 
 function buildPalettePreprocess(inputBuffer, { mode, paletteSize }) {
